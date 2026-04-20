@@ -391,7 +391,8 @@ const DEFAULT_PROJECT = {
 const uid = () => Math.random().toString(36).slice(2, 10);
 const now = () => new Date().toISOString();
 
-// ── 스토리지 (IndexedDB + Supabase) ─────────────────
+// ── 영구 스토리지 (Claude 아티팩트 전용) ──────────────
+
 const IDB_NAME = "novel_writer_db",
   IDB_STORE = "kv";
 function openIDB() {
@@ -1302,13 +1303,7 @@ function Sidebar({
   syncStatus,
   onSyncComplete
 }) {
-  const [panel, setPanel] = useState("");
-  // AI 설정 상태
-  const [provider, setProvider] = useState(_apiCfg.provider || "claude");
-  const [aiKey, setAiKey] = useState(_apiCfg.key || "");
-  const [smartModel, setSmartModel] = useState(_apiCfg.smartModel || "");
-  const [fastModel, setFastModel] = useState(_apiCfg.fastModel || "");
-  // Supabase 상태
+  const [panel, setPanel] = useState(""); // "" | "ai" | "sync"
   const [sbUrl, setSbUrl] = useState(loadSbCfg().url || "");
   const [sbKey, setSbKey] = useState(loadSbCfg().key || "");
   const [email, setEmail] = useState(loadSbCfg().email || "");
@@ -1316,57 +1311,6 @@ function Sidebar({
   const [sbLoading, setSbLoading] = useState(false);
   const [sbMsg, setSbMsg] = useState(null);
   const isLoggedIn = !!_sb.userId;
-  const hasAiKey = !!_apiCfg.key;
-  const cfg = PROVIDERS[provider] || PROVIDERS.claude;
-  const saveAi = () => {
-    const p = PROVIDERS[provider];
-    saveApiCfg({
-      provider,
-      key: aiKey,
-      smartModel: smartModel || p.smartModel,
-      fastModel: fastModel || p.fastModel
-    });
-    setPanel("");
-  };
-  const ModelPicker = ({
-    label,
-    value,
-    onChange
-  }) => {
-    const def = label === "창작" ? cfg.smartModel : cfg.fastModel;
-    return /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        flexDirection: "column",
-        gap: 3
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 10,
-        color: "var(--text2)"
-      }
-    }, label, " \uBAA8\uB378"), /*#__PURE__*/React.createElement("select", {
-      value: value || "",
-      onChange: e => onChange(e.target.value),
-      style: {
-        fontSize: 11,
-        padding: "3px 6px"
-      }
-    }, /*#__PURE__*/React.createElement("option", {
-      value: ""
-    }, "\uAE30\uBCF8 (", def, ")"), (cfg.models || []).map(m => /*#__PURE__*/React.createElement("option", {
-      key: m,
-      value: m
-    }, m))), /*#__PURE__*/React.createElement("input", {
-      value: value,
-      onChange: e => onChange(e.target.value),
-      placeholder: "직접 입력 (기본: " + def + ")",
-      style: {
-        fontSize: 10,
-        padding: "3px 6px"
-      }
-    }));
-  };
   const signIn = async () => {
     if (!sbUrl || !sbKey || !email || !password) {
       setSbMsg({
@@ -1380,15 +1324,34 @@ function Sidebar({
     try {
       await sbSignIn(sbUrl, sbKey, email, password);
       const cloud = await sbLoadStore();
-      onSyncComplete(cloud);
-      setSbMsg({
-        ok: true,
-        msg: "로그인 성공 ✓ 클라우드 동기화 활성화"
-      });
+      if (cloud) {
+        // 클라우드에 데이터 있으면 불러오기
+        onSyncComplete(cloud);
+        setSbMsg({
+          ok: true,
+          msg: "로그인 성공 ✓ 클라우드 데이터를 불러왔습니다"
+        });
+      } else {
+        // 클라우드가 비어있으면 로컬 데이터를 업로드
+        const local = await loadStore();
+        if (local && local.projects && local.projects.length > 0) {
+          await saveStore(local);
+          setSbMsg({
+            ok: true,
+            msg: `로그인 성공 ✓ 로컬 데이터(${local.projects.length}개 작품)를 클라우드에 업로드했습니다`
+          });
+        } else {
+          setSbMsg({
+            ok: true,
+            msg: "로그인 성공 ✓ 클라우드 동기화 활성화됨"
+          });
+        }
+        onSyncComplete(null);
+      }
     } catch (e) {
       setSbMsg({
         ok: false,
-        msg: e.message.slice(0, 60)
+        msg: e.message.slice(0, 80)
       });
     } finally {
       setSbLoading(false);
@@ -1439,10 +1402,22 @@ function Sidebar({
           ok: true,
           msg: "클라우드에서 불러왔습니다 ✓"
         });
-      } else setSbMsg({
-        ok: false,
-        msg: "클라우드에 저장된 데이터 없음"
-      });
+      } else {
+        // 클라우드가 비어있으면 로컬 데이터를 지금 업로드
+        const local = await loadStore();
+        if (local && local.projects && local.projects.length > 0) {
+          await saveStore(local);
+          setSbMsg({
+            ok: true,
+            msg: `로컬 데이터(${local.projects.length}개 작품)를 클라우드에 업로드했습니다 ✓`
+          });
+        } else {
+          setSbMsg({
+            ok: false,
+            msg: "클라우드에도, 로컬에도 저장된 작품이 없습니다"
+          });
+        }
+      }
     } catch (e) {
       setSbMsg({
         ok: false,
@@ -1492,7 +1467,7 @@ function Sidebar({
       color: "var(--text2)",
       marginTop: 2
     }
-  }, isLoggedIn ? `☁ 동기화 활성 (${loadSbCfg().email?.split("@")[0] || ""})` : "AI 웹소설 창작 도구")), /*#__PURE__*/React.createElement("div", {
+  }, isLoggedIn ? `☁ 클라우드 동기화 활성 (${loadSbCfg().email?.split("@")[0] || ""})` : "AI 웹소설 창작 도구")), /*#__PURE__*/React.createElement("div", {
     style: {
       padding: "8px 10px",
       borderBottom: "1px solid var(--border)",
@@ -1500,18 +1475,6 @@ function Sidebar({
       gap: 5
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setPanel(panel === "ai" ? "" : "ai"),
-    style: {
-      flex: 1,
-      padding: "6px 0",
-      borderRadius: 6,
-      fontSize: 11,
-      fontWeight: 500,
-      background: hasAiKey ? "rgba(74,222,128,0.08)" : panel === "ai" ? "var(--surface2)" : "transparent",
-      color: hasAiKey ? "var(--success)" : "var(--text2)",
-      border: `1px solid ${hasAiKey ? "rgba(74,222,128,0.3)" : "var(--border)"}`
-    }
-  }, "\uD83E\uDD16 AI \uC124\uC815"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setPanel(panel === "sync" ? "" : "sync"),
     style: {
       flex: 1,
@@ -1523,95 +1486,7 @@ function Sidebar({
       color: isLoggedIn ? "var(--success)" : "var(--text2)",
       border: `1px solid ${isLoggedIn ? "rgba(74,222,128,0.3)" : "var(--border)"}`
     }
-  }, "\u2601 \uB3D9\uAE30\uD654")), panel === "ai" && /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: "12px",
-      borderBottom: "1px solid var(--border)",
-      display: "flex",
-      flexDirection: "column",
-      gap: 8,
-      maxHeight: 380,
-      overflowY: "auto"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: "var(--text2)",
-      fontWeight: 600
-    }
-  }, "AI \uACF5\uAE09\uC790"), Object.entries(PROVIDERS).map(([id, p]) => /*#__PURE__*/React.createElement("label", {
-    key: id,
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 7,
-      fontSize: 12,
-      cursor: "pointer",
-      padding: "4px 8px",
-      borderRadius: 6,
-      background: provider === id ? "var(--surface2)" : "transparent"
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    type: "radio",
-    name: "prov",
-    checked: provider === id,
-    onChange: () => {
-      setProvider(id);
-      setSmartModel("");
-      setFastModel("");
-    },
-    style: {
-      accentColor: "var(--accent)"
-    }
-  }), p.icon, " ", p.name)), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: "var(--text2)"
-    }
-  }, cfg.keyLabel, " \u2014 ", /*#__PURE__*/React.createElement("a", {
-    href: cfg.keyLink,
-    target: "_blank",
-    rel: "noreferrer",
-    style: {
-      color: "var(--accent)"
-    }
-  }, "\uBC1C\uAE09 \u2197")), /*#__PURE__*/React.createElement("input", {
-    type: "password",
-    value: aiKey,
-    onChange: e => setAiKey(e.target.value),
-    placeholder: "API \uD0A4 \uC785\uB825...",
-    style: {
-      fontSize: 12,
-      padding: "5px 8px"
-    }
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: "var(--text2)",
-      fontWeight: 600,
-      borderTop: "1px solid var(--border)",
-      paddingTop: 6
-    }
-  }, "\uBAA8\uB378 \uC124\uC815"), /*#__PURE__*/React.createElement(ModelPicker, {
-    label: "\uCC3D\uC791",
-    value: smartModel,
-    onChange: setSmartModel
-  }), /*#__PURE__*/React.createElement(ModelPicker, {
-    label: "\uC694\uC57D",
-    value: fastModel,
-    onChange: setFastModel
-  }), /*#__PURE__*/React.createElement("button", {
-    onClick: saveAi,
-    disabled: !aiKey,
-    style: {
-      padding: "7px 0",
-      borderRadius: 6,
-      fontSize: 12,
-      background: "var(--accent2)",
-      color: "#fff",
-      opacity: !aiKey ? 0.5 : 1
-    }
-  }, "\uC800\uC7A5")), panel === "sync" && /*#__PURE__*/React.createElement("div", {
+  }, "\u2601 ", isLoggedIn ? "동기화" : "클라우드")), panel === "sync" && /*#__PURE__*/React.createElement("div", {
     style: {
       padding: "12px",
       borderBottom: "1px solid var(--border)",
@@ -3932,10 +3807,9 @@ function ExportModal({
   planningData: pd,
   onClose
 }) {
-  const [exporting, setExporting] = useState(false);
+  const [view, setView] = useState(""); // "" | "md" | "txt"
   const bi = pd.basicInfo || {};
-
-  // 마크다운 생성
+  const textareaRef = useRef();
   const toMarkdown = () => {
     const lines = [];
     lines.push(`# ${project.title || "제목 없음"}`);
@@ -3958,18 +3832,14 @@ function ExportModal({
       lines.push("## 막 구조");
       lines.push("| 막 | 화수 | 제목 | 핵심 질문 | 주요 사건 | 클라이맥스 |");
       lines.push("|---|---|---|---|---|---|");
-      pd.acts.forEach(a => {
-        lines.push(`| ${a.number}막 | ${a.episodes} | ${a.title} | ${a.question} | ${a.events} | ${a.climax} |`);
-      });
+      pd.acts.forEach(a => lines.push(`| ${a.number}막 | ${a.episodes} | ${a.title} | ${a.question} | ${a.events} | ${a.climax} |`));
       lines.push("");
     }
     if (pd.chapters.length > 0) {
       lines.push("## 회차별 플롯");
       lines.push("| 화수 | 소제목 | 주요 사건 | 심리 | 클리프행어 |");
       lines.push("|---|---|---|---|---|");
-      pd.chapters.forEach(c => {
-        lines.push(`| ${c.number}화 | ${c.subtitle} | ${c.events} | ${c.psychology} | ${c.cliffhanger} |`);
-      });
+      pd.chapters.forEach(c => lines.push(`| ${c.number}화 | ${c.subtitle} | ${c.events} | ${c.psychology} | ${c.cliffhanger} |`));
       lines.push("");
     }
     if (project.characters.length > 0) {
@@ -3983,190 +3853,68 @@ function ExportModal({
     }
     return lines.join("\n");
   };
-  const downloadMd = () => {
-    const blob = new Blob([toMarkdown()], {
-      type: "text/markdown;charset=utf-8"
-    });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${project.title || "기획서"}.md`;
-    a.click();
+  const toPlainText = () => {
+    const lines = [];
+    lines.push(`■ ${project.title || "제목 없음"}`);
+    lines.push(`장르: ${project.genre || "미정"} | 매체: ${project.media || "웹소설"} | 총 화수: ${bi.totalEpisodes || "미정"}`);
+    lines.push("");
+    if (bi.theme) {
+      lines.push("[ 핵심 테마 ]");
+      lines.push(bi.theme);
+      lines.push("");
+    }
+    if (bi.synopsis) {
+      lines.push("[ 시놉시스 ]");
+      lines.push(bi.synopsis);
+      lines.push("");
+    }
+    if (bi.protagonist) {
+      lines.push(`주인공: ${bi.protagonist}`);
+      lines.push("");
+    }
+    if (pd.acts.length > 0) {
+      lines.push("[ 막 구조 ]");
+      pd.acts.forEach(a => {
+        lines.push(`\n${a.number}막 ${a.episodes} — ${a.title}`);
+        if (a.question) lines.push(`  핵심 질문: ${a.question}`);
+        if (a.events) lines.push(`  주요 사건: ${a.events}`);
+        if (a.climax) lines.push(`  클라이맥스: ${a.climax}`);
+      });
+      lines.push("");
+    }
+    if (pd.chapters.length > 0) {
+      lines.push("[ 회차별 플롯 ]");
+      pd.chapters.forEach(c => {
+        lines.push(`\n${c.number}화 ${c.subtitle}`);
+        if (c.events) lines.push(`  사건: ${c.events}`);
+        if (c.psychology) lines.push(`  심리: ${c.psychology}`);
+        if (c.cliffhanger) lines.push(`  클리프행어: ${c.cliffhanger}`);
+      });
+      lines.push("");
+    }
+    if (project.characters.length > 0) {
+      lines.push("[ 등장인물 ]");
+      project.characters.forEach(c => {
+        lines.push(`\n▶ ${c.name} (${c.role})`);
+        if (c.description) lines.push(c.description);
+        if (c.notes) lines.push(c.notes);
+      });
+    }
+    return lines.join("\n");
   };
+  const getText = () => view === "md" ? toMarkdown() : toPlainText();
 
-  // PDF — 인쇄 다이얼로그 활용
-  const exportPdf = () => {
-    const html = `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">
-<title>${project.title || "기획서"}</title>
-<style>
-  body{font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;font-size:11pt;line-height:1.8;margin:2cm;color:#111}
-  h1{font-size:18pt;font-weight:700;border-bottom:2px solid #333;padding-bottom:6px;margin-bottom:16px}
-  h2{font-size:14pt;font-weight:700;margin-top:24px;margin-bottom:8px;border-left:3px solid #666;padding-left:8px}
-  h3{font-size:12pt;font-weight:700;margin-top:16px;margin-bottom:4px}
-  blockquote{border-left:3px solid #999;padding:6px 12px;margin:12px 0;color:#444;font-style:italic}
-  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:10pt}
-  th{background:#f0f0f0;padding:6px 8px;border:1px solid #ccc;text-align:left;font-weight:600}
-  td{padding:6px 8px;border:1px solid #ddd;vertical-align:top}
-  .meta{font-size:10pt;color:#555;margin-bottom:16px}
-  @page{margin:2cm}
-  @media print{body{margin:0}}
-</style></head><body>
-<h1>${project.title || "제목 없음"}</h1>
-<div class="meta">${project.genre || ""} &nbsp;|&nbsp; ${project.media || ""} &nbsp;|&nbsp; 총 ${bi.totalEpisodes || "?"}화</div>
-${bi.theme ? `<blockquote>${bi.theme}</blockquote>` : ""}
-${bi.synopsis ? `<h2>시놉시스</h2><p>${bi.synopsis.replace(/\n/g, "<br>")}</p>` : ""}
-${bi.protagonist ? `<p><strong>주인공:</strong> ${bi.protagonist}</p>` : ""}
-${pd.acts.length > 0 ? `<h2>막 구조</h2><table>
-<tr><th>막</th><th>화수</th><th>제목</th><th>핵심 질문</th><th>주요 사건</th><th>클라이맥스</th></tr>
-${pd.acts.map(a => `<tr><td>${a.number}막</td><td>${a.episodes}</td><td>${a.title}</td><td>${a.question}</td><td>${a.events}</td><td>${a.climax}</td></tr>`).join("")}
-</table>` : ""}
-${pd.chapters.length > 0 ? `<h2>회차별 플롯</h2><table>
-<tr><th>화수</th><th>소제목</th><th>주요 사건</th><th>심리</th><th>클리프행어</th></tr>
-${pd.chapters.map(c => `<tr><td>${c.number}화</td><td>${c.subtitle}</td><td>${c.events}</td><td>${c.psychology}</td><td>${c.cliffhanger}</td></tr>`).join("")}
-</table>` : ""}
-${project.characters.length > 0 ? `<h2>등장인물</h2>${project.characters.map(c => `<h3>${c.name} <span style="font-weight:400;font-size:10pt;color:#666">(${c.role})</span></h3>
-  ${c.description ? `<p>${c.description}</p>` : ""}
-  ${c.notes ? `<p>${c.notes.replace(/\n/g, "<br>")}</p>` : ""}`).join("")}` : ""}
-</body></html>`;
-    const w = window.open("", "_blank");
-    w.document.write(html);
-    w.document.close();
-    w.focus();
-    setTimeout(() => {
-      w.print();
-    }, 500);
-  };
-
-  // docx — docx 라이브러리 사용
-  const exportDocx = async () => {
-    setExporting(true);
-    try {
-      await new Promise((res, rej) => {
-        if (window.docx) return res();
-        const s = document.createElement("script");
-        s.src = "https://cdn.jsdelivr.net/npm/docx@8/build/index.js";
-        s.onload = res;
-        s.onerror = rej;
-        document.head.appendChild(s);
-      });
-      const {
-        Document,
-        Packer,
-        Paragraph,
-        Table,
-        TableRow,
-        TableCell,
-        TextRun,
-        HeadingLevel,
-        WidthType,
-        BorderStyle
-      } = window.docx;
-      const mkPara = (text, opts = {}) => new Paragraph({
-        children: [new TextRun({
-          text: String(text || ""),
-          ...opts
-        })],
-        ...opts
-      });
-      const borderNone = {
-        style: BorderStyle.NONE,
-        size: 0,
-        color: "FFFFFF"
-      };
-      const mkTableCell = (text, header = false) => new TableCell({
-        children: [new Paragraph({
-          children: [new TextRun({
-            text: String(text || ""),
-            bold: header,
-            size: 20
-          })]
-        })],
-        margins: {
-          top: 60,
-          bottom: 60,
-          left: 80,
-          right: 80
-        }
-      });
-      const children = [new Paragraph({
-        text: project.title || "제목 없음",
-        heading: HeadingLevel.TITLE
-      }), mkPara(`장르: ${project.genre || "미정"}  /  매체: ${project.media || "미정"}  /  총 화수: ${bi.totalEpisodes || "미정"}`, {
-        color: "666666",
-        size: 20
-      }), mkPara(""), ...(bi.theme ? [mkPara(`"${bi.theme}"`, {
-        italics: true,
-        color: "444444"
-      }), mkPara("")] : []), ...(bi.synopsis ? [new Paragraph({
-        text: "시놉시스",
-        heading: HeadingLevel.HEADING_2
-      }), mkPara(bi.synopsis), mkPara("")] : []), ...(bi.protagonist ? [mkPara(`주인공: ${bi.protagonist}`), mkPara("")] : [])];
-      if (pd.acts.length > 0) {
-        children.push(new Paragraph({
-          text: "막 구조",
-          heading: HeadingLevel.HEADING_2
-        }));
-        children.push(new Table({
-          width: {
-            size: 100,
-            type: WidthType.PERCENTAGE
-          },
-          rows: [new TableRow({
-            children: ["막", "화수", "제목", "핵심 질문", "주요 사건", "클라이맥스"].map(h => mkTableCell(h, true)),
-            tableHeader: true
-          }), ...pd.acts.map(a => new TableRow({
-            children: [`${a.number}막`, a.episodes, a.title, a.question, a.events, a.climax].map(v => mkTableCell(v))
-          }))]
-        }));
-        children.push(mkPara(""));
-      }
-      if (pd.chapters.length > 0) {
-        children.push(new Paragraph({
-          text: "회차별 플롯",
-          heading: HeadingLevel.HEADING_2
-        }));
-        children.push(new Table({
-          width: {
-            size: 100,
-            type: WidthType.PERCENTAGE
-          },
-          rows: [new TableRow({
-            children: ["화수", "소제목", "주요 사건", "심리", "클리프행어"].map(h => mkTableCell(h, true)),
-            tableHeader: true
-          }), ...pd.chapters.map(c => new TableRow({
-            children: [`${c.number}화`, c.subtitle, c.events, c.psychology, c.cliffhanger].map(v => mkTableCell(v))
-          }))]
-        }));
-        children.push(mkPara(""));
-      }
-      if (project.characters.length > 0) {
-        children.push(new Paragraph({
-          text: "등장인물",
-          heading: HeadingLevel.HEADING_2
-        }));
-        project.characters.forEach(c => {
-          children.push(new Paragraph({
-            text: `${c.name} (${c.role})`,
-            heading: HeadingLevel.HEADING_3
-          }));
-          if (c.description) children.push(mkPara(c.description));
-          if (c.notes) children.push(mkPara(c.notes));
-          children.push(mkPara(""));
-        });
-      }
-      const doc = new Document({
-        sections: [{
-          children
-        }]
-      });
-      const blob = await Packer.toBlob(doc);
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${project.title || "기획서"}.docx`;
-      a.click();
-    } catch (e) {
-      alert("docx 생성 실패: " + e.message);
-    } finally {
-      setExporting(false);
+  // textarea 포커스 + 전체 선택
+  useEffect(() => {
+    if (view && textareaRef.current) {
+      textareaRef.current.focus();
+      textareaRef.current.select();
+    }
+  }, [view]);
+  const selectAll = () => {
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+      textareaRef.current.select();
     }
   };
   return /*#__PURE__*/React.createElement("div", {
@@ -4186,50 +3934,57 @@ ${project.characters.length > 0 ? `<h2>등장인물</h2>${project.characters.map
       background: "var(--surface)",
       border: "1px solid var(--border)",
       borderRadius: 16,
-      padding: 28,
-      width: 400,
-      maxWidth: "90vw"
+      padding: 24,
+      width: view ? 600 : 440,
+      maxWidth: "95vw",
+      maxHeight: "90vh",
+      display: "flex",
+      flexDirection: "column"
     },
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 17,
       fontWeight: 700,
-      marginBottom: 6,
+      marginBottom: 4,
       fontFamily: "var(--font-serif)"
     }
-  }, "\uAE30\uD68D\uC11C \uB0B4\uBCF4\uB0B4\uAE30"), /*#__PURE__*/React.createElement("div", {
+  }, "\uAE30\uD68D\uC11C \uB0B4\uBCF4\uB0B4\uAE30"), !view ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: "var(--text2)",
-      marginBottom: 20,
-      lineHeight: 1.5
+      marginBottom: 16,
+      lineHeight: 1.6
     }
-  }, "\uACF5\uBAA8\uC804 \uC81C\uCD9C\uC6A9 \uAE30\uD68D\uC11C\uB97C \uC6D0\uD558\uB294 \uD615\uC2DD\uC73C\uB85C \uB0B4\uBCF4\uB0C5\uB2C8\uB2E4."), /*#__PURE__*/React.createElement("div", {
+  }, "\uD615\uC2DD\uC744 \uC120\uD0DD\uD558\uBA74 \uD14D\uC2A4\uD2B8\uAC00 \uD45C\uC2DC\uB429\uB2C8\uB2E4.", /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: "var(--accent)"
+    }
+  }, "Ctrl+A"), " \uB85C \uC804\uCCB4 \uC120\uD0DD \uD6C4 ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: "var(--accent)"
+    }
+  }, "Ctrl+C"), " \uB85C \uBCF5\uC0AC\uD558\uC138\uC694."), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
       gap: 10
     }
   }, /*#__PURE__*/React.createElement(ExportBtn, {
-    icon: "\uD83D\uDCDD",
-    label: "Word \uBB38\uC11C (.docx)",
-    desc: "\uACF5\uBAA8\uC804 \uC81C\uCD9C \uAE30\uBCF8 \uD3EC\uB9F7 / \uD55C\uCEF4\uC5D0\uC11C hwp \uBCC0\uD658 \uAC00\uB2A5",
-    onClick: exportDocx,
-    loading: exporting
-  }), /*#__PURE__*/React.createElement(ExportBtn, {
-    icon: "\uD83D\uDDA8\uFE0F",
-    label: "PDF (.pdf)",
-    desc: "\uBE0C\uB77C\uC6B0\uC800 \uC778\uC1C4 \u2192 PDF \uC800\uC7A5",
-    onClick: exportPdf
-  }), /*#__PURE__*/React.createElement(ExportBtn, {
     icon: "\uD83D\uDCCB",
-    label: "\uB9C8\uD06C\uB2E4\uC6B4 (.md)",
-    desc: "\uB178\uC158\xB7\uAE43\uD5C8\uBE0C\xB7Obsidian \uB4F1 \uD65C\uC6A9",
-    onClick: downloadMd
+    label: "\uB9C8\uD06C\uB2E4\uC6B4 \uBCF4\uAE30",
+    desc: "\uB178\uC158 \xB7 \uAE43\uD5C8\uBE0C \xB7 Obsidian \u2192 \uC11C\uC2DD \uC720\uC9C0",
+    onClick: () => setView("md"),
+    active: false
+  }), /*#__PURE__*/React.createElement(ExportBtn, {
+    icon: "\uD83D\uDCC4",
+    label: "\uC77C\uBC18 \uD14D\uC2A4\uD2B8 \uBCF4\uAE30",
+    desc: "\uD55C\uAE00 \xB7 \uC6CC\uB4DC \xB7 \uBA54\uBAA8\uC7A5 \uB4F1\uC5D0 \uBD99\uC5EC\uB123\uAE30",
+    onClick: () => setView("txt"),
+    active: false
   })), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginTop: 16,
+      marginTop: 14,
       padding: "10px 12px",
       background: "var(--surface2)",
       borderRadius: 8,
@@ -4237,10 +3992,10 @@ ${project.characters.length > 0 ? `<h2>등장인물</h2>${project.characters.map
       color: "var(--text2)",
       lineHeight: 1.6
     }
-  }, "\uD83D\uDCA1 \uD55C\uAE00(.hwp) \uC9C1\uC811 \uB0B4\uBCF4\uB0B4\uAE30\uB294 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. Word(.docx)\uB85C \uB0B4\uBCF4\uB0B8 \uD6C4 \uD55C\uAE00 \uC624\uD53C\uC2A4\uC5D0\uC11C \uC5F4\uC5B4 hwp\uB85C \uC800\uC7A5\uD558\uC138\uC694."), /*#__PURE__*/React.createElement("button", {
+  }, "\uD83D\uDCA1 Vercel \uBC30\uD3EC \uBC84\uC804\uC5D0\uC11C\uB294 Word(.docx) \xB7 PDF \uC9C1\uC811 \uB2E4\uC6B4\uB85C\uB4DC\uB3C4 \uC9C0\uC6D0\uD569\uB2C8\uB2E4."), /*#__PURE__*/React.createElement("button", {
     onClick: onClose,
     style: {
-      marginTop: 16,
+      marginTop: 14,
       width: "100%",
       padding: "9px 0",
       background: "var(--surface2)",
@@ -4249,30 +4004,113 @@ ${project.characters.length > 0 ? `<h2>등장인물</h2>${project.characters.map
       fontSize: 13,
       border: "1px solid var(--border)"
     }
-  }, "\uB2EB\uAE30")));
+  }, "\uB2EB\uAE30")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--text2)",
+      marginBottom: 8,
+      lineHeight: 1.7
+    }
+  }, "\uC544\uB798 \uD14D\uC2A4\uD2B8\uB97C \uD074\uB9AD \uD6C4 ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: "var(--accent)"
+    }
+  }, "Ctrl+A"), " (\uC804\uCCB4\uC120\uD0DD) \u2192", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: "var(--accent)"
+    }
+  }, " Ctrl+C"), " (\uBCF5\uC0AC) \u2192 \uBD99\uC5EC\uB123\uAE30 \uC571\uC5D0\uC11C ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: "var(--accent)"
+    }
+  }, "Ctrl+V")), /*#__PURE__*/React.createElement("button", {
+    onClick: selectAll,
+    style: {
+      alignSelf: "flex-start",
+      marginBottom: 8,
+      padding: "5px 14px",
+      borderRadius: 6,
+      fontSize: 12,
+      fontWeight: 600,
+      background: "var(--accent2)",
+      color: "#fff",
+      border: "none"
+    }
+  }, "\uC804\uCCB4 \uC120\uD0DD"), /*#__PURE__*/React.createElement("textarea", {
+    ref: textareaRef,
+    readOnly: true,
+    value: getText(),
+    onClick: selectAll,
+    style: {
+      flex: 1,
+      minHeight: 320,
+      fontSize: 12,
+      fontFamily: "var(--font-body)",
+      lineHeight: 1.7,
+      background: "var(--surface2)",
+      border: "1px solid var(--accent)",
+      borderRadius: 8,
+      padding: "12px 14px",
+      resize: "none",
+      color: "var(--text)"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setView(""),
+    style: {
+      flex: 1,
+      padding: "8px 0",
+      background: "var(--surface2)",
+      color: "var(--text2)",
+      borderRadius: 8,
+      fontSize: 13,
+      border: "1px solid var(--border)"
+    }
+  }, "\u2190 \uB4A4\uB85C"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      flex: 1,
+      padding: "8px 0",
+      background: "var(--surface2)",
+      color: "var(--text2)",
+      borderRadius: 8,
+      fontSize: 13,
+      border: "1px solid var(--border)"
+    }
+  }, "\uB2EB\uAE30")))));
 }
+
+// ── 작성 보조 패널 ────────────────────────────────────
 function ExportBtn({
   icon,
   label,
   desc,
   onClick,
-  loading
+  active
 }) {
   return /*#__PURE__*/React.createElement("button", {
     onClick: onClick,
-    disabled: loading,
     style: {
       padding: "12px 16px",
-      background: "var(--surface2)",
-      border: "1px solid var(--border)",
+      background: active ? "rgba(74,222,128,0.1)" : "var(--surface2)",
+      border: `1px solid ${active ? "var(--success)" : "var(--border)"}`,
       borderRadius: 10,
       textAlign: "left",
       cursor: "pointer",
-      opacity: loading ? 0.6 : 1,
-      transition: "border-color 0.15s"
+      transition: "all 0.15s",
+      width: "100%"
     },
-    onMouseEnter: e => e.currentTarget.style.borderColor = "var(--accent)",
-    onMouseLeave: e => e.currentTarget.style.borderColor = "var(--border)"
+    onMouseEnter: e => {
+      if (!active) e.currentTarget.style.borderColor = "var(--accent)";
+    },
+    onMouseLeave: e => {
+      if (!active) e.currentTarget.style.borderColor = "var(--border)";
+    }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -4283,13 +4121,13 @@ function ExportBtn({
     style: {
       fontSize: 20
     }
-  }, icon), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  }, active ? "✓" : icon), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 14,
       fontWeight: 500,
-      color: "var(--text)"
+      color: active ? "var(--success)" : "var(--text)"
     }
-  }, loading ? "생성 중..." : label), /*#__PURE__*/React.createElement("div", {
+  }, active ? "복사됨!" : label), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: "var(--text2)",
