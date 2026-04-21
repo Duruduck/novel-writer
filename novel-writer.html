@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover"/>
   <meta name="mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
   <title>✦ Novel Writer</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
@@ -392,7 +391,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const now = () => new Date().toISOString();
 
 // ── 영구 스토리지 (Claude 아티팩트 전용) ──────────────
-
+// ── 저장소: IndexedDB (배포용) ──────────────────────────
 const IDB_NAME = "novel_writer_db",
   IDB_STORE = "kv";
 function openIDB() {
@@ -428,15 +427,9 @@ async function saveStore(data) {
       req.onerror = e => rej(e.target.error);
     });
   } catch (_) {}
-  if (_sb.client && _sb.userId) {
+  if (_sb.token && _sb.userId) {
     try {
-      await _sb.client.from("projects").upsert({
-        user_id: _sb.userId,
-        data,
-        updated_at: new Date().toISOString()
-      }, {
-        onConflict: "user_id"
-      });
+      await sbSaveStore(data);
     } catch (e) {
       console.warn("Supabase 저장 실패:", e.message);
     }
@@ -444,8 +437,11 @@ async function saveStore(data) {
 }
 
 // ── Supabase 동기화 ───────────────────────────────────
+// ── Supabase 순수 fetch 구현 (CDN 불필요) ─────────────
 const _sb = {
-  client: null,
+  url: null,
+  key: null,
+  token: null,
   userId: null
 };
 function loadSbCfg() {
@@ -456,87 +452,13 @@ function loadSbCfg() {
   }
 }
 function saveSbCfg(cfg) {
-  localStorage.setItem("novel_sb_cfg", JSON.stringify(cfg));
-}
-async function initSupabase(url, key) {
-  // Supabase JS 동적 로드
-  if (!window.supabase) {
-    await new Promise((res, rej) => {
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js";
-      s.onload = res;
-      s.onerror = () => rej(new Error("Supabase 라이브러리 로드 실패"));
-      document.head.appendChild(s);
-    });
-  }
-  _sb.client = window.supabase.createClient(url, key);
-  return _sb.client;
-}
-async function sbSignUp(url, key, email, password) {
-  const client = await initSupabase(url, key);
-  const {
-    data,
-    error
-  } = await client.auth.signUp({
-    email,
-    password
-  });
-  if (error) throw new Error(error.message);
-  return data.user;
-}
-async function sbSignIn(url, key, email, password) {
-  const client = await initSupabase(url, key);
-  const {
-    data,
-    error
-  } = await client.auth.signInWithPassword({
-    email,
-    password
-  });
-  if (error) throw new Error(error.message);
-  _sb.userId = data.user.id;
-  saveSbCfg({
-    url,
-    key,
-    userId: data.user.id,
-    email
-  });
-  return data.user;
-}
-async function sbSignOut() {
-  if (_sb.client) await _sb.client.auth.signOut();
-  _sb.client = null;
-  _sb.userId = null;
-  saveSbCfg({});
-}
-async function sbLoadStore() {
-  if (!_sb.client || !_sb.userId) return null;
-  const {
-    data,
-    error
-  } = await _sb.client.from("projects").select("data").eq("user_id", _sb.userId).single();
-  if (error) return null;
-  return data?.data || null;
-}
-
-// 앱 시작 시 Supabase 자동 복원
-async function tryRestoreSession() {
-  const cfg = loadSbCfg();
-  if (!cfg.url || !cfg.key || !cfg.userId) return null;
   try {
-    await initSupabase(cfg.url, cfg.key);
-    const {
-      data
-    } = await _sb.client.auth.getSession();
-    if (data.session) {
-      _sb.userId = data.session.user.id;
-      return await sbLoadStore();
-    }
+    localStorage.setItem("novel_sb_cfg", JSON.stringify(cfg));
   } catch (_) {}
-  return null;
 }
 
-// ── Claude API 호출 (아티팩트 자동 인증) ──────────────
+// API 설정도 localStorage 안전하게
+// ── AI 공급자 ──────────────────────────────────────────
 const PROVIDERS = {
   claude: {
     name: "Claude (Anthropic)",
@@ -616,7 +538,7 @@ const PROVIDERS = {
     keyLabel: "Google AI API Key",
     keyLink: "https://aistudio.google.com/app/apikey",
     call: async (sys, usr, key, model, maxTok) => {
-      const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + key, {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -663,7 +585,9 @@ let _apiCfg = {
 })();
 function saveApiCfg(cfg) {
   _apiCfg = cfg;
-  localStorage.setItem("novel_api_cfg", JSON.stringify(cfg));
+  try {
+    localStorage.setItem("novel_api_cfg", JSON.stringify(cfg));
+  } catch (_) {}
 }
 async function callAI(sys, usr, opts) {
   const {
@@ -675,10 +599,12 @@ async function callAI(sys, usr, opts) {
     key
   } = _apiCfg;
   if (!key) throw new Error("API 키가 없습니다. 설정에서 입력하세요.");
-  const p = PROVIDERS[provider];
+  const p = PROVIDERS[provider] || PROVIDERS.claude;
   const model = fast ? _apiCfg.fastModel || p.fastModel : _apiCfg.smartModel || p.smartModel;
   return await p.call(sys, usr, key, model, maxTokens);
 }
+
+// callClaude 호환 래퍼
 const callClaude = (sys, usr, opts) => {
   const fast = !!(opts && opts.model && (opts.model.includes("haiku") || opts.model.includes("mini") || opts.model.includes("lite")));
   return callAI(sys, usr, {
@@ -688,6 +614,113 @@ const callClaude = (sys, usr, opts) => {
 };
 const MODEL_FAST = "fast";
 const MODEL_SMART = "smart";
+async function sbFetch(path, opts = {}) {
+  const url = _sb.url + path;
+  const headers = {
+    "Content-Type": "application/json",
+    "apikey": _sb.key,
+    ...(opts.headers || {})
+  };
+  if (_sb.token) headers["Authorization"] = "Bearer " + _sb.token;
+  const res = await fetch(url, {
+    ...opts,
+    headers
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json?.error_description || json?.message || json?.error || "HTTP " + res.status);
+  return json;
+}
+async function sbSignUp(url, key, email, password) {
+  _sb.url = url.replace(/\/$/, "");
+  _sb.key = key;
+  const data = await sbFetch("/auth/v1/signup", {
+    method: "POST",
+    body: JSON.stringify({
+      email,
+      password
+    })
+  });
+  return data.user;
+}
+async function sbSignIn(url, key, email, password) {
+  _sb.url = url.replace(/\/$/, "");
+  _sb.key = key;
+  const data = await sbFetch("/auth/v1/token?grant_type=password", {
+    method: "POST",
+    body: JSON.stringify({
+      email,
+      password
+    })
+  });
+  _sb.token = data.access_token;
+  _sb.userId = data.user?.id;
+  saveSbCfg({
+    url: _sb.url,
+    key,
+    token: data.access_token,
+    userId: _sb.userId,
+    email
+  });
+  return data.user;
+}
+async function sbSignOut() {
+  try {
+    if (_sb.token) await sbFetch("/auth/v1/logout", {
+      method: "POST"
+    });
+  } catch (_) {}
+  _sb.token = null;
+  _sb.userId = null;
+  saveSbCfg({});
+}
+async function sbLoadStore() {
+  if (!_sb.token || !_sb.userId) return null;
+  try {
+    const data = await sbFetch(`/rest/v1/projects?select=data&user_id=eq.${_sb.userId}&limit=1`, {
+      headers: {
+        "Accept": "application/json",
+        "Prefer": "return=representation"
+      }
+    });
+    if (Array.isArray(data) && data.length > 0) return data[0].data;
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+async function sbSaveStore(storeData) {
+  if (!_sb.token || !_sb.userId) return;
+  await sbFetch("/rest/v1/projects", {
+    method: "POST",
+    headers: {
+      "Prefer": "resolution=merge-duplicates,return=minimal"
+    },
+    body: JSON.stringify({
+      user_id: _sb.userId,
+      data: storeData,
+      updated_at: new Date().toISOString()
+    })
+  });
+}
+
+// 앱 시작 시 세션 복원
+async function tryRestoreSession() {
+  const cfg = loadSbCfg();
+  if (!cfg.url || !cfg.key || !cfg.token) return null;
+  _sb.url = cfg.url;
+  _sb.key = cfg.key;
+  _sb.token = cfg.token;
+  _sb.userId = cfg.userId;
+  try {
+    // 토큰 유효성 검사
+    await sbFetch("/auth/v1/user");
+    return await sbLoadStore();
+  } catch (_) {
+    _sb.token = null;
+    _sb.userId = null;
+    return null;
+  }
+}
 
 // ── JSON 복구 유틸 ────────────────────────────────────
 // 문자열 값 내부의 이스케이프되지 않은 줄바꿈·탭 등 제어문자 제거
@@ -1096,7 +1129,7 @@ function App() {
   const persist = useCallback(nextStore => {
     setStore(nextStore);
     setSyncStatus("syncing");
-    saveStore(nextStore).then(() => setSyncStatus(_sb.userId ? "synced" : ""));
+    saveStore(nextStore).then(() => setSyncStatus(_sb.token ? "synced" : ""));
   }, []);
   const selectedProject = store.projects.find(p => p.id === selectedId) ?? null;
   const updateProject = useCallback((id, patch) => {
@@ -1237,6 +1270,11 @@ function App() {
     onCreate: createProject,
     onDelete: deleteProject,
     syncStatus: syncStatus,
+    store: store,
+    onImport: imported => {
+      setStore(imported);
+      saveStore(imported);
+    },
     onSyncComplete: cloudStore => {
       if (cloudStore) {
         setStore(cloudStore);
@@ -1301,16 +1339,43 @@ function Sidebar({
   onCreate,
   onDelete,
   syncStatus,
-  onSyncComplete
+  onSyncComplete,
+  store,
+  onImport
 }) {
-  const [panel, setPanel] = useState(""); // "" | "ai" | "sync"
+  const [panel, setPanel] = useState(""); // "" | "ai" | "sync" | "transfer"
+  // AI 설정
+  const [provider, setProvider] = useState(_apiCfg.provider || "claude");
+  const [aiKey, setAiKey] = useState(_apiCfg.key || "");
+  const [smartModel, setSmartModel] = useState(_apiCfg.smartModel || "");
+  const [fastModel, setFastModel] = useState(_apiCfg.fastModel || "");
+  // Supabase
   const [sbUrl, setSbUrl] = useState(loadSbCfg().url || "");
   const [sbKey, setSbKey] = useState(loadSbCfg().key || "");
   const [email, setEmail] = useState(loadSbCfg().email || "");
   const [password, setPassword] = useState("");
   const [sbLoading, setSbLoading] = useState(false);
   const [sbMsg, setSbMsg] = useState(null);
-  const isLoggedIn = !!_sb.userId;
+  // 데이터 이전
+  const [importText, setImportText] = useState("");
+  const [importMsg, setImportMsg] = useState(null);
+  const jsonTextareaRef = useRef();
+  const isLoggedIn = !!_sb.token;
+  const hasAiKey = !!_apiCfg.key;
+  const prov = PROVIDERS[provider] || PROVIDERS.claude;
+
+  /* ── AI 설정 저장 ── */
+  const saveAi = () => {
+    saveApiCfg({
+      provider,
+      key: aiKey,
+      smartModel: smartModel || prov.smartModel,
+      fastModel: fastModel || prov.fastModel
+    });
+    setPanel("");
+  };
+
+  /* ── Supabase ── */
   const signIn = async () => {
     if (!sbUrl || !sbKey || !email || !password) {
       setSbMsg({
@@ -1325,27 +1390,23 @@ function Sidebar({
       await sbSignIn(sbUrl, sbKey, email, password);
       const cloud = await sbLoadStore();
       if (cloud) {
-        // 클라우드에 데이터 있으면 불러오기
         onSyncComplete(cloud);
         setSbMsg({
           ok: true,
           msg: "로그인 성공 ✓ 클라우드 데이터를 불러왔습니다"
         });
       } else {
-        // 클라우드가 비어있으면 로컬 데이터를 업로드
         const local = await loadStore();
         if (local && local.projects && local.projects.length > 0) {
           await saveStore(local);
           setSbMsg({
             ok: true,
-            msg: `로그인 성공 ✓ 로컬 데이터(${local.projects.length}개 작품)를 클라우드에 업로드했습니다`
+            msg: `로그인 성공 ✓ 로컬 데이터(${local.projects.length}개 작품)를 업로드했습니다`
           });
-        } else {
-          setSbMsg({
-            ok: true,
-            msg: "로그인 성공 ✓ 클라우드 동기화 활성화됨"
-          });
-        }
+        } else setSbMsg({
+          ok: true,
+          msg: "로그인 성공 ✓ 클라우드 동기화 활성화됨"
+        });
         onSyncComplete(null);
       }
     } catch (e) {
@@ -1371,7 +1432,7 @@ function Sidebar({
       await sbSignUp(sbUrl, sbKey, email, password);
       setSbMsg({
         ok: true,
-        msg: "가입 완료! 이메일 확인 후 로그인하세요."
+        msg: "가입 완료! 로그인하세요."
       });
     } catch (e) {
       setSbMsg({
@@ -1391,7 +1452,7 @@ function Sidebar({
     });
   };
   const syncNow = async () => {
-    if (!_sb.client || !_sb.userId) return;
+    if (!_sb.token || !_sb.userId) return;
     setSbLoading(true);
     setSbMsg(null);
     try {
@@ -1403,20 +1464,17 @@ function Sidebar({
           msg: "클라우드에서 불러왔습니다 ✓"
         });
       } else {
-        // 클라우드가 비어있으면 로컬 데이터를 지금 업로드
         const local = await loadStore();
         if (local && local.projects && local.projects.length > 0) {
           await saveStore(local);
           setSbMsg({
             ok: true,
-            msg: `로컬 데이터(${local.projects.length}개 작품)를 클라우드에 업로드했습니다 ✓`
+            msg: `로컬 데이터(${local.projects.length}개 작품)를 업로드했습니다 ✓`
           });
-        } else {
-          setSbMsg({
-            ok: false,
-            msg: "클라우드에도, 로컬에도 저장된 작품이 없습니다"
-          });
-        }
+        } else setSbMsg({
+          ok: false,
+          msg: "저장된 작품이 없습니다"
+        });
       }
     } catch (e) {
       setSbMsg({
@@ -1429,6 +1487,16 @@ function Sidebar({
   };
   const syncIcon = syncStatus === "syncing" ? "⟳" : syncStatus === "synced" ? "☁" : "";
   const syncColor = syncStatus === "synced" ? "var(--success)" : "var(--text2)";
+  const BtnStyle = (active, green) => ({
+    flex: 1,
+    padding: "6px 4px",
+    borderRadius: 6,
+    fontSize: 11,
+    fontWeight: 500,
+    background: green ? "rgba(74,222,128,0.08)" : active ? "var(--surface2)" : "transparent",
+    color: green ? "var(--success)" : active ? "var(--text)" : "var(--text2)",
+    border: `1px solid ${green ? "rgba(74,222,128,0.3)" : "var(--border)"}`
+  });
   return /*#__PURE__*/React.createElement("aside", {
     style: {
       width: 240,
@@ -1467,28 +1535,135 @@ function Sidebar({
       color: "var(--text2)",
       marginTop: 2
     }
-  }, isLoggedIn ? `☁ 클라우드 동기화 활성 (${loadSbCfg().email?.split("@")[0] || ""})` : "AI 웹소설 창작 도구")), /*#__PURE__*/React.createElement("div", {
+  }, isLoggedIn ? `☁ 동기화 활성 (${loadSbCfg().email?.split("@")[0] || ""})` : "AI 웹소설 창작 도구")), /*#__PURE__*/React.createElement("div", {
     style: {
       padding: "8px 10px",
       borderBottom: "1px solid var(--border)",
       display: "flex",
-      gap: 5
+      gap: 4
     }
   }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPanel(panel === "ai" ? "" : "ai"),
+    style: BtnStyle(panel === "ai", hasAiKey)
+  }, "\uD83E\uDD16 AI"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setPanel(panel === "sync" ? "" : "sync"),
+    style: BtnStyle(panel === "sync", isLoggedIn)
+  }, "\u2601 \uB3D9\uAE30\uD654"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPanel(panel === "transfer" ? "" : "transfer"),
+    style: BtnStyle(panel === "transfer", false)
+  }, "\uD83D\uDCE6 \uC774\uC804")), panel === "ai" && /*#__PURE__*/React.createElement("div", {
     style: {
-      flex: 1,
-      padding: "6px 0",
-      borderRadius: 6,
-      fontSize: 11,
-      fontWeight: 500,
-      background: isLoggedIn ? "rgba(74,222,128,0.08)" : panel === "sync" ? "var(--surface2)" : "transparent",
-      color: isLoggedIn ? "var(--success)" : "var(--text2)",
-      border: `1px solid ${isLoggedIn ? "rgba(74,222,128,0.3)" : "var(--border)"}`
+      padding: 12,
+      borderBottom: "1px solid var(--border)",
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 380,
+      overflowY: "auto"
     }
-  }, "\u2601 ", isLoggedIn ? "동기화" : "클라우드")), panel === "sync" && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
-      padding: "12px",
+      fontSize: 11,
+      color: "var(--text2)",
+      fontWeight: 600
+    }
+  }, "AI \uACF5\uAE09\uC790"), Object.entries(PROVIDERS).map(([id, p]) => /*#__PURE__*/React.createElement("label", {
+    key: id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 7,
+      fontSize: 12,
+      cursor: "pointer",
+      padding: "4px 8px",
+      borderRadius: 6,
+      background: provider === id ? "var(--surface2)" : "transparent"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    name: "prov",
+    checked: provider === id,
+    onChange: () => {
+      setProvider(id);
+      setSmartModel("");
+      setFastModel("");
+    },
+    style: {
+      accentColor: "var(--accent)"
+    }
+  }), p.icon, " ", p.name)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--text2)"
+    }
+  }, prov.keyLabel, " \u2014 ", /*#__PURE__*/React.createElement("a", {
+    href: prov.keyLink,
+    target: "_blank",
+    rel: "noreferrer",
+    style: {
+      color: "var(--accent)"
+    }
+  }, "\uBC1C\uAE09 \u2197")), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    value: aiKey,
+    onChange: e => setAiKey(e.target.value),
+    placeholder: "API \uD0A4 \uC785\uB825...",
+    style: {
+      fontSize: 12,
+      padding: "5px 8px"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--text2)",
+      fontWeight: 600,
+      borderTop: "1px solid var(--border)",
+      paddingTop: 6
+    }
+  }, "\uCC3D\uC791 \uBAA8\uB378"), /*#__PURE__*/React.createElement("select", {
+    value: smartModel,
+    onChange: e => setSmartModel(e.target.value),
+    style: {
+      fontSize: 11,
+      padding: "3px 6px"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\uAE30\uBCF8 (", prov.smartModel, ")"), (prov.models || []).map(m => /*#__PURE__*/React.createElement("option", {
+    key: m,
+    value: m
+  }, m))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--text2)",
+      fontWeight: 600
+    }
+  }, "\uC694\uC57D \uBAA8\uB378"), /*#__PURE__*/React.createElement("select", {
+    value: fastModel,
+    onChange: e => setFastModel(e.target.value),
+    style: {
+      fontSize: 11,
+      padding: "3px 6px"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\uAE30\uBCF8 (", prov.fastModel, ")"), (prov.models || []).map(m => /*#__PURE__*/React.createElement("option", {
+    key: m,
+    value: m
+  }, m))), /*#__PURE__*/React.createElement("button", {
+    onClick: saveAi,
+    disabled: !aiKey,
+    style: {
+      padding: "7px 0",
+      borderRadius: 6,
+      fontSize: 12,
+      background: aiKey ? "var(--accent2)" : "var(--surface2)",
+      color: aiKey ? "#fff" : "var(--text2)",
+      border: "none"
+    }
+  }, "\uC800\uC7A5")), panel === "sync" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 12,
       borderBottom: "1px solid var(--border)",
       display: "flex",
       flexDirection: "column",
@@ -1505,7 +1680,7 @@ function Sidebar({
   }, "Supabase \uC124\uC815"), /*#__PURE__*/React.createElement("input", {
     value: sbUrl,
     onChange: e => setSbUrl(e.target.value),
-    placeholder: "Project URL (https://xxx.supabase.co)",
+    placeholder: "https://xxx.supabase.co",
     style: {
       fontSize: 11,
       padding: "5px 8px"
@@ -1513,7 +1688,7 @@ function Sidebar({
   }), /*#__PURE__*/React.createElement("input", {
     value: sbKey,
     onChange: e => setSbKey(e.target.value),
-    placeholder: "anon public key",
+    placeholder: "sb_publishable_... \uD0A4",
     type: "password",
     style: {
       fontSize: 11,
@@ -1542,29 +1717,23 @@ function Sidebar({
     style: {
       fontSize: 11,
       padding: "5px 8px"
-    },
-    onKeyDown: e => e.key === "Enter" && signIn()
-  }), sbMsg && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: sbMsg.ok ? "var(--success)" : "var(--danger)"
     }
-  }, sbMsg.msg), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      gap: 5
+      gap: 6
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: signIn,
     disabled: sbLoading,
     style: {
-      flex: 1,
+      flex: 2,
       padding: "6px 0",
       borderRadius: 6,
       fontSize: 11,
       background: "var(--accent2)",
       color: "#fff",
-      opacity: sbLoading ? 0.6 : 1
+      border: "none"
     }
   }, sbLoading ? "..." : "로그인"), /*#__PURE__*/React.createElement("button", {
     onClick: signUp,
@@ -1575,108 +1744,210 @@ function Sidebar({
       borderRadius: 6,
       fontSize: 11,
       background: "var(--surface2)",
-      color: "var(--text)",
-      border: "1px solid var(--border)",
-      opacity: sbLoading ? 0.6 : 1
-    }
-  }, sbLoading ? "..." : "회원가입")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10,
       color: "var(--text2)",
-      lineHeight: 1.5
+      border: "1px solid var(--border)"
     }
-  }, "\uD83D\uDCA1 ", /*#__PURE__*/React.createElement("a", {
-    href: "https://supabase.com",
-    target: "_blank",
-    rel: "noreferrer",
-    style: {
-      color: "var(--accent)"
-    }
-  }, "supabase.com"), "\uC5D0\uC11C \uBB34\uB8CC \uD504\uB85C\uC81D\uD2B8 \uC0DD\uC131 \uD6C4 URL\xB7\uD0A4\uB97C \uC785\uB825\uD558\uC138\uC694.")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, sbLoading ? "..." : "가입"))) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
-      color: "var(--success)"
+      color: "var(--success)",
+      fontWeight: 600
     }
-  }, "\u2601 \uB85C\uADF8\uC778\uB428 \u2014 ", loadSbCfg().email), sbMsg && /*#__PURE__*/React.createElement("div", {
+  }, "\u2601 \uB3D9\uAE30\uD654 \uD65C\uC131"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
-      color: sbMsg.ok ? "var(--success)" : "var(--danger)"
+      color: "var(--text2)"
     }
-  }, sbMsg.msg), /*#__PURE__*/React.createElement("button", {
+  }, loadSbCfg().email), /*#__PURE__*/React.createElement("button", {
     onClick: syncNow,
     disabled: sbLoading,
     style: {
-      padding: "7px 0",
+      padding: "6px 0",
       borderRadius: 6,
       fontSize: 11,
       background: "var(--surface2)",
       color: "var(--text)",
-      border: "1px solid var(--border)",
-      opacity: sbLoading ? 0.6 : 1
-    }
-  }, "\uD074\uB77C\uC6B0\uB4DC\uC5D0\uC11C \uAC00\uC838\uC624\uAE30"), /*#__PURE__*/React.createElement("button", {
-    onClick: signOut,
-    style: {
-      padding: "7px 0",
-      borderRadius: 6,
-      fontSize: 11,
-      background: "none",
-      color: "var(--text2)",
       border: "1px solid var(--border)"
     }
-  }, "\uB85C\uADF8\uC544\uC6C3"))), /*#__PURE__*/React.createElement("div", {
+  }, sbLoading ? "..." : "☁ 클라우드에서 가져오기"), /*#__PURE__*/React.createElement("button", {
+    onClick: signOut,
     style: {
-      padding: "10px 12px 8px"
+      padding: "6px 0",
+      borderRadius: 6,
+      fontSize: 11,
+      background: "transparent",
+      color: "var(--danger)",
+      border: "1px solid var(--danger)"
     }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: onCreate,
+  }, "\uB85C\uADF8\uC544\uC6C3")), sbMsg && /*#__PURE__*/React.createElement("div", {
     style: {
-      width: "100%",
-      padding: "9px 12px",
-      background: "var(--accent2)",
-      color: "#fff",
-      borderRadius: 8,
-      fontSize: 13,
-      fontWeight: 500,
+      fontSize: 11,
+      color: sbMsg.ok ? "var(--success)" : "var(--danger)",
+      padding: "4px 8px",
+      borderRadius: 6,
+      background: sbMsg.ok ? "rgba(74,222,128,0.08)" : "rgba(248,113,113,0.08)",
+      lineHeight: 1.5
+    }
+  }, sbMsg.msg)), panel === "transfer" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 12,
+      borderBottom: "1px solid var(--border)",
       display: "flex",
-      alignItems: "center",
-      gap: 6
-    }
-  }, /*#__PURE__*/React.createElement(Icon, {
-    name: "plus",
-    size: 14
-  }), " \uC0C8 \uC791\uD488")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      overflowY: "auto",
-      padding: "4px 8px"
-    }
-  }, projects.length === 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: "24px 8px",
-      color: "var(--text2)",
-      fontSize: 12,
-      textAlign: "center"
-    }
-  }, "\uC791\uD488\uC744 \uB9CC\uB4E4\uC5B4\uBCF4\uC138\uC694"), projects.map(p => /*#__PURE__*/React.createElement("div", {
-    key: p.id,
-    onClick: () => onSelect(p.id),
-    style: {
-      padding: "10px 10px",
-      borderRadius: 8,
-      cursor: "pointer",
-      marginBottom: 2,
-      background: selectedId === p.id ? "var(--surface2)" : "transparent",
-      border: selectedId === p.id ? "1px solid var(--border)" : "1px solid transparent",
-      transition: "all 0.15s",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 8
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 420,
+      overflowY: "auto"
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
+      fontSize: 11,
+      fontWeight: 600,
+      color: "var(--text)"
+    }
+  }, "\uD83D\uDCE6 \uAE30\uAE30 \uAC04 \uB370\uC774\uD130 \uC774\uC804"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--text2)",
+      lineHeight: 1.5
+    }
+  }, "JSX \u2194 Vercel \uBC84\uC804 \uC0AC\uC774 JSON \uC774\uC804"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      fontWeight: 600,
+      color: "var(--text)",
+      borderTop: "1px solid var(--border)",
+      paddingTop: 6
+    }
+  }, "\u2460 \uB0B4\uBCF4\uB0B4\uAE30"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--text2)"
+    }
+  }, "\uD074\uB9AD \u2192 Ctrl+A \u2192 Ctrl+C"), /*#__PURE__*/React.createElement("textarea", {
+    ref: jsonTextareaRef,
+    readOnly: true,
+    value: JSON.stringify(store || {
+      projects: []
+    }),
+    onClick: () => jsonTextareaRef.current?.select(),
+    style: {
+      fontSize: 9,
+      minHeight: 72,
+      fontFamily: "monospace",
+      background: "var(--surface2)",
+      border: "1px solid var(--accent)",
+      borderRadius: 6,
+      padding: "6px 8px",
+      resize: "none",
+      color: "var(--text2)"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => jsonTextareaRef.current?.select(),
+    style: {
+      padding: "5px 0",
+      borderRadius: 6,
+      fontSize: 11,
+      background: "var(--surface2)",
+      color: "var(--text)",
+      border: "1px solid var(--border)"
+    }
+  }, "\uC804\uCCB4 \uC120\uD0DD"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      fontWeight: 600,
+      color: "var(--text)",
+      borderTop: "1px solid var(--border)",
+      paddingTop: 6
+    }
+  }, "\u2461 \uAC00\uC838\uC624\uAE30"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--text2)"
+    }
+  }, "\uBCF5\uC0AC\uD55C JSON \uBD99\uC5EC\uB123\uAE30"), /*#__PURE__*/React.createElement("textarea", {
+    value: importText,
+    onChange: e => {
+      setImportText(e.target.value);
+      setImportMsg(null);
+    },
+    placeholder: "{\"projects\":[...]} \uD615\uD0DC",
+    style: {
+      fontSize: 9,
+      minHeight: 72,
+      fontFamily: "monospace",
+      background: "var(--surface2)",
+      border: "1px solid var(--border)",
+      borderRadius: 6,
+      padding: "6px 8px",
+      resize: "none"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      try {
+        const parsed = JSON.parse(importText.trim());
+        if (!parsed.projects || !Array.isArray(parsed.projects)) throw new Error("올바른 형식이 아닙니다");
+        onImport(parsed);
+        setImportMsg({
+          ok: true,
+          msg: `✓ ${parsed.projects.length}개 작품 가져오기 완료`
+        });
+        setImportText("");
+      } catch (e) {
+        setImportMsg({
+          ok: false,
+          msg: "❌ " + e.message
+        });
+      }
+    },
+    disabled: !importText.trim(),
+    style: {
+      padding: "6px 0",
+      borderRadius: 6,
+      fontSize: 11,
+      fontWeight: 600,
+      border: "none",
+      background: importText.trim() ? "var(--accent2)" : "var(--surface2)",
+      color: importText.trim() ? "#fff" : "var(--text2)"
+    }
+  }, "\uAC00\uC838\uC624\uAE30 \uC801\uC6A9"), importMsg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: importMsg.ok ? "var(--success)" : "var(--danger)",
+      padding: "4px 8px",
+      borderRadius: 6,
+      background: importMsg.ok ? "rgba(74,222,128,0.08)" : "rgba(248,113,113,0.08)"
+    }
+  }, importMsg.msg)), /*#__PURE__*/React.createElement("div", {
+    style: {
       flex: 1,
+      overflowY: "auto",
+      padding: "8px 0"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "6px 16px 4px",
+      fontSize: 10,
+      fontWeight: 600,
+      color: "var(--text2)",
+      letterSpacing: 1,
+      textTransform: "uppercase"
+    }
+  }, "\uB0B4 \uC791\uD488"), projects.map(p => /*#__PURE__*/React.createElement("div", {
+    key: p.id,
+    onClick: () => onSelect(p.id),
+    style: {
+      padding: "8px 14px",
+      cursor: "pointer",
+      borderRadius: 8,
+      margin: "1px 6px",
+      background: selectedId === p.id ? "var(--surface2)" : "transparent",
+      transition: "background 0.15s",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
       minWidth: 0
     }
   }, /*#__PURE__*/React.createElement("div", {
@@ -1691,13 +1962,28 @@ function Sidebar({
   }, p.title || "제목 없음"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
-      color: "var(--text2)",
-      marginTop: 2
+      color: "var(--text2)"
     }
   }, p.genre || "장르 미설정", " \xB7 ", p.chapters.length, "\uD654")), /*#__PURE__*/React.createElement(DeleteBtn, {
     onDelete: () => onDelete(p.id),
     size: 13
-  })))));
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "10px 12px",
+      borderTop: "1px solid var(--border)"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onCreate,
+    style: {
+      width: "100%",
+      padding: "9px 0",
+      background: "var(--accent2)",
+      color: "#fff",
+      borderRadius: 8,
+      fontSize: 13,
+      fontWeight: 500
+    }
+  }, "+ \uC0C8 \uC791\uD488")));
 }
 
 // ── 프로젝트 홈 ──────────────────────────────────────
@@ -4982,7 +5268,7 @@ function MobileTabBar({
   const _root = ReactDOM.createRoot(document.getElementById("root"));
   _root.render(React.createElement(App));
   const el = document.getElementById("loading");
-  if (el) el.remove();
+  if(el) el.remove();
 })();
   </script>
 </body>
